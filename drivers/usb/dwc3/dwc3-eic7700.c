@@ -4,7 +4,7 @@
  *
  * Copyright 2024, Beijing ESWIN Computing Technology Co., Ltd.. All rights reserved.
  *
- * Authors: Wei Yang <yangwei@eswincomputing.com>
+ * Authors: Wei Yang <yangwei1@eswincomputing.com>
  *          SenChuan Zhang <zhangsenchuan@eswincomputing.com>
  */
 
@@ -599,7 +599,7 @@ static struct platform_driver dwc3_eswin_driver = {
 module_platform_driver(dwc3_eswin_driver);
 
 MODULE_ALIAS("platform:eic7700-dwc3");
-MODULE_AUTHOR("Wei Yang <yangwei@eswincomputing.com");
+MODULE_AUTHOR("Wei Yang <yangwei1@eswincomputing.com");
 MODULE_AUTHOR("SenChuan Zhang <zhangsenchuan@eswincomputing.com");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DesignWare USB3 ESWIN Glue Layer");
