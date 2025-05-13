@@ -7,6 +7,7 @@ $schema: http://devicetree.org/meta-schemas/core.yaml#
 title: Eswin EIC7700 PCIe host controller
 
 maintainers:
+  - Yu Ning <ningyu@eswincomputing.com>
   - SenChuan Zhang <zhangsenchuan@eswincomputing.com>
 
 description: |
