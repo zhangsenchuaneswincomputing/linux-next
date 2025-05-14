@@ -129,16 +129,16 @@ examples:
 
         pcie: pcie@54000000 {
           compatible = "eswin,eic7700-pcie";
-          clocks = <&d0_clock 562>,
-                  <&d0_clock 563>,
-                  <&d0_clock 564>,
-                  <&d0_clock 565>;
+          clocks = <&clock 562>,
+                   <&clock 563>,
+                   <&clock 564>,
+                   <&clock 565>;
           clock-names = "pcie_aclk", "pcie_cfg_clk", "pcie_cr_clk", "pcie_aux_clk";
 
           reset-names = "pcie_cfg", "pcie_powerup", "pcie_pwren";
-          resets = <&d0_reset 8 (1 << 0)>,
-                  <&d0_reset 8 (1 << 1)>,
-                  <&d0_reset 8 (1 << 2)>;
+          resets = <&reset 8 (1 << 0)>,
+                   <&reset 8 (1 << 1)>,
+                   <&reset 8 (1 << 2)>;
 
           #address-cells = <3>;
           #size-cells = <2>;
