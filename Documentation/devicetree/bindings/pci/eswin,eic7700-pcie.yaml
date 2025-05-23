@@ -8,10 +8,13 @@ title: Eswin EIC7700 PCIe host controller
 
 maintainers:
   - Yu Ning <ningyu@eswincomputing.com>
-  - SenChuan Zhang <zhangsenchuan@eswincomputing.com>
+  - Senchuan Zhang <zhangsenchuan@eswincomputing.com>
 
-description: |
+description:
   The PCIe controller on EIC7700 SoC.
+
+allOf:
+  - $ref: /schemas/pci/pci-host-bridge.yaml#
 
 properties:
   compatible:
@@ -26,14 +29,11 @@ properties:
       - const: config
       - const: mgmt
 
-  "#address-cells":
-    const: 3
-  "#size-cells":
-    const: 2
   '#interrupt-cells':
     const: 1
 
   interrupts:
+    minItems: 9
     maxItems: 9
 
   interrupt-names:
@@ -59,43 +59,23 @@ properties:
 
   clocks:
     maxItems: 4
-    description: handles to clock for the pcie controller.
 
   clock-names:
     items:
-      - const: pcie_aclk
-      - const: pcie_cfg_clk
-      - const: pcie_cr_clk
-      - const: pcie_aux_clk
-    description: the name of each clock.
+      - const: aclk
+      - const: cfg
+      - const: cr
+      - const: aux
 
   resets:
-    description: resets to be used by the controller.
+    minItems: 1
+    maxItems: 3
 
   reset-names:
     items:
-      - const: pcie_cfg
-      - const: pcie_powerup
-      - const: pcie_pwren
-    description: names of the resets listed in resets property in the same order.
-
-  bus-range:
-    items:
-      - const: 0
-      - const: 0xff
-
-  device_type:
-    const: pci
-
-  ranges: true
-
-  dma-noncoherent: true
-
-  num-lanes:
-    maximum: 4
-
-  numa-node-id:
-    maximum: 0
+      - const: cfg
+      - const: powerup
+      - const: pwren
 
 required:
   - compatible
@@ -103,23 +83,15 @@ required:
   - reg-names
   - interrupts
   - interrupt-names
-  - interrupt-parent
   - interrupt-map-mask
   - interrupt-map
-  - '#address-cells'
-  - '#size-cells'
   - '#interrupt-cells'
   - clocks
   - clock-names
   - resets
   - reset-names
-  - bus-range
-  - dma-noncoherent
-  - num-lanes
-  - ranges
-  - numa-node-id
 
-additionalProperties: false
+unevaluatedProperties: false
 
 examples:
   - |
@@ -128,48 +100,39 @@ examples:
         #size-cells = <2>;
 
         pcie: pcie@54000000 {
-          compatible = "eswin,eic7700-pcie";
-          clocks = <&clock 562>,
-                   <&clock 563>,
-                   <&clock 564>,
-                   <&clock 565>;
-          clock-names = "pcie_aclk", "pcie_cfg_clk", "pcie_cr_clk", "pcie_aux_clk";
-
-          reset-names = "pcie_cfg", "pcie_powerup", "pcie_pwren";
-          resets = <&reset 8 (1 << 0)>,
-                   <&reset 8 (1 << 1)>,
-                   <&reset 8 (1 << 2)>;
-
-          #address-cells = <3>;
-          #size-cells = <2>;
-          #interrupt-cells = <1>;
-
-          reg = <0x0 0x54000000 0x0 0x4000000>,
+            compatible = "eswin,eic7700-pcie";
+            reg = <0x0 0x54000000 0x0 0x4000000>,
                 <0x0 0x40000000 0x0 0x800000>,
                 <0x0 0x50000000 0x0 0x100000>;
-          reg-names = "dbi", "config", "mgmt";
-          device_type = "pci";
+            reg-names = "dbi", "config", "mgmt";
+            ranges = <0x81000000 0x0 0x40800000 0x0 0x40800000 0x0 0x800000>,
+                    <0x82000000 0x0 0x41000000 0x0 0x41000000 0x0 0xf000000>,
+                    <0xc3000000 0x80 0x00000000 0x80 0x00000000 0x2 0x00000000>;
 
-          bus-range = <0x0 0xff>;
-          ranges = <0x81000000 0x0 0x40800000 0x0 0x40800000 0x0 0x800000>,
-                  <0x82000000 0x0 0x41000000 0x0 0x41000000 0x0 0xf000000>,
-                  <0xc3000000 0x80 0x00000000 0x80 0x00000000 0x2 0x00000000>;
+            bus-range = <0x0 0xff>;
+            device_type = "pci";
+            num-lanes = <0x4>;
 
-          num-lanes = <0x4>;
-          /**********************************
-              msi_ctrl_io[0~31] : 188~219
-              msi_ctrl_int : 220
-          **********************************/
-          interrupts = <220>, <179>, <180>, <181>, <182>, <183>, <184>, <185>, <186>;
-          interrupt-names = "msi", "inta", "intb", "intc", "intd";
-          interrupt-parent = <&plic>;
-          interrupt-map-mask = <0x0 0x0 0x0 0x7>;
-          interrupt-map = <0x0 0x0 0x0 0x1 &plic 179>,
-                          <0x0 0x0 0x0 0x2 &plic 180>,
-                          <0x0 0x0 0x0 0x3 &plic 181>,
-                          <0x0 0x0 0x0 0x4 &plic 182>;
-          status = "disabled";
-          numa-node-id = <0>;
-          dma-noncoherent;
-        };
+            clocks = <&clock 562>,
+                    <&clock 563>,
+                    <&clock 564>,
+                    <&clock 565>;
+            clock-names = "aclk", "cfg", "cr", "aux";
+            reset-names = "cfg", "powerup", "pwren";
+            resets = <&reset 8 (1 << 0)>,
+                    <&reset 8 (1 << 1)>,
+                    <&reset 8 (1 << 2)>;
+
+            #address-cells = <3>;
+            #size-cells = <2>;
+            #interrupt-cells = <1>;
+            interrupts = <220>, <179>, <180>, <181>, <182>;
+            interrupt-names = "msi", "inta", "intb", "intc", "intd";
+            interrupt-parent = <&plic>;
+            interrupt-map-mask = <0x0 0x0 0x0 0x7>;
+            interrupt-map = <0x0 0x0 0x0 0x1 &plic 179>,
+                            <0x0 0x0 0x0 0x2 &plic 180>,
+                            <0x0 0x0 0x0 0x3 &plic 181>,
+                            <0x0 0x0 0x0 0x4 &plic 182>;
+          };
     };
