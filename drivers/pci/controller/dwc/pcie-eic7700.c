@@ -5,15 +5,8 @@
  * Copyright 2024, Beijing ESWIN Computing Technology Co., Ltd.. All rights reserved.
  *
  * Authors: Yu Ning <ningyu@eswincomputing.com>
- *          SenChuan Zhang <zhangsenchuan@eswincomputing.com>
+ *          Senchuan Zhang <zhangsenchuan@eswincomputing.com>
  */
-
-#include <linux/clk.h>
-#include <linux/delay.h>
-#include <linux/gpio.h>
-#include <linux/gpio/consumer.h>
-#include <linux/kernel.h>
-#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/platform_device.h>
@@ -23,22 +16,18 @@
 #include <linux/interrupt.h>
 #include <linux/iopoll.h>
 #include <linux/reset.h>
-#include <linux/gpio/consumer.h>
-#include <linux/property.h>
 #include "pcie-designware.h"
 #include <linux/pm_runtime.h>
 
 struct eswin_pcie {
 	struct dw_pcie pci;
 	void __iomem *mgmt_base;
-	struct gpio_desc *reset;
-	struct clk *pcie_aux;
-	struct clk *pcie_cfg;
-	struct clk *pcie_cr;
-	struct clk *pcie_aclk;
+    struct clk_bulk_data *clks;
 	struct reset_control *powerup_rst;
 	struct reset_control *cfg_rst;
 	struct reset_control *perst;
+
+    int num_clks;
 };
 
 #define PCIE_PM_SEL_AUX_CLK BIT(16)
@@ -59,14 +48,6 @@ struct eswin_pcie {
 
 #define PCIEMGMT_LINKUP_STATE_VALIDATE ((0x11 << 2) | 0x3)
 #define PCIEMGMT_LINKUP_STATE_MASK 0xff
-
-static void eswin_pcie_shutdown(struct platform_device *pdev)
-{
-	struct eswin_pcie *pcie = platform_get_drvdata(pdev);
-
-	/* Bring down link, so bootloader gets clean state in case of reboot */
-	reset_control_assert(pcie->perst);
-}
 
 static int eswin_pcie_start_link(struct dw_pcie *pci)
 {
@@ -89,51 +70,10 @@ static int eswin_pcie_link_up(struct dw_pcie *pci)
 
 	val = readl_relaxed(pcie->mgmt_base + PCIEMGMT_STATUS0_OFFSET);
 	if ((val & PCIEMGMT_LINKUP_STATE_MASK) ==
-	    PCIEMGMT_LINKUP_STATE_VALIDATE)
+		PCIEMGMT_LINKUP_STATE_VALIDATE)
 		return 1;
 	else
 		return 0;
-}
-
-static int eswin_pcie_clk_enable(struct eswin_pcie *pcie)
-{
-	int ret;
-
-	ret = clk_prepare_enable(pcie->pcie_cr);
-	if (ret) {
-		pr_err("PCIe: failed to enable cr clk: %d\n", ret);
-		return ret;
-	}
-
-	ret = clk_prepare_enable(pcie->pcie_aclk);
-	if (ret) {
-		pr_err("PCIe: failed to enable aclk: %d\n", ret);
-		return ret;
-	}
-
-	ret = clk_prepare_enable(pcie->pcie_cfg);
-	if (ret) {
-		pr_err("PCIe: failed to enable cfg_clk: %d\n", ret);
-		return ret;
-	}
-
-	ret = clk_prepare_enable(pcie->pcie_aux);
-	if (ret) {
-		pr_err("PCIe: failed to enable aux_clk: %d\n", ret);
-		return ret;
-	}
-
-	return 0;
-}
-
-static int eswin_pcie_clk_disable(struct eswin_pcie *eswin_pcie)
-{
-	clk_disable_unprepare(eswin_pcie->pcie_aux);
-	clk_disable_unprepare(eswin_pcie->pcie_cfg);
-	clk_disable_unprepare(eswin_pcie->pcie_cr);
-	clk_disable_unprepare(eswin_pcie->pcie_aclk);
-
-	return 0;
 }
 
 static int eswin_pcie_power_on(struct eswin_pcie *pcie)
@@ -142,11 +82,17 @@ static int eswin_pcie_power_on(struct eswin_pcie *pcie)
 
 	/* pciet_cfg_rstn */
 	ret = reset_control_reset(pcie->cfg_rst);
-	WARN_ON(ret != 0);
+	if (ret) {
+		dev_err(pcie->pci.dev, "cfg signal is invalid");
+		return ret;
+	}
 
 	/* pciet_powerup_rstn */
 	ret = reset_control_reset(pcie->powerup_rst);
-	WARN_ON(ret != 0);
+	if (ret) {
+		dev_err(pcie->pci.dev, "powerup signal is invalid");
+		return ret;
+	}
 
 	return ret;
 }
@@ -154,30 +100,10 @@ static int eswin_pcie_power_on(struct eswin_pcie *pcie)
 static int eswin_pcie_power_off(struct eswin_pcie *eswin_pcie)
 {
 	reset_control_assert(eswin_pcie->perst);
-
 	reset_control_assert(eswin_pcie->powerup_rst);
-
 	reset_control_assert(eswin_pcie->cfg_rst);
 
 	return 0;
-}
-
-static int eswin_evb_socket_power_on(struct device *dev)
-{
-	int err_desc = 0;
-	struct gpio_desc *gpio;
-
-	gpio = devm_gpiod_get(dev, "pci-socket", GPIOD_OUT_LOW);
-	err_desc = IS_ERR(gpio);
-
-	if (err_desc) {
-		pr_debug("No power control gpio found, maybe not needed\n");
-		return 0;
-	}
-
-	gpiod_set_value(gpio, 1);
-
-	return err_desc;
 }
 
 static int eswin_pcie_host_init(struct dw_pcie_rp *pp)
@@ -187,10 +113,9 @@ static int eswin_pcie_host_init(struct dw_pcie_rp *pp)
 	int ret;
 	u32 val;
 
-	/* pciet_aux_clken, pcie_cfg_clken */
-	ret = eswin_pcie_clk_enable(pcie);
+	ret = clk_bulk_prepare_enable(pcie->num_clks, pcie->clks);
 	if (ret)
-		return ret;
+		return dev_err_probe(pci->dev, ret, "failed to enable clocks\n");
 
 	ret = eswin_pcie_power_on(pcie);
 	if (ret)
@@ -202,12 +127,17 @@ static int eswin_pcie_host_init(struct dw_pcie_rp *pp)
 	writel_relaxed(val | 0x4, pcie->mgmt_base + PCIEMGMT_CTRL0_OFFSET);
 
 	ret = reset_control_assert(pcie->perst);
-	WARN_ON(ret != 0);
+	if (ret) {
+		dev_err(pci->dev, "reset control assert signal is invalid");
+		return ret;
+	}
 
-	eswin_evb_socket_power_on(pcie->pci.dev);
 	msleep(100);
 	ret = reset_control_deassert(pcie->perst);
-	WARN_ON(ret != 0);
+	if (ret) {
+		dev_err(pci->dev, "reset control deassert signal is invalid");
+		return ret;
+	}
 
 	/* app_hold_phy_rst */
 	val = readl_relaxed(pcie->mgmt_base + PCIEMGMT_CTRL0_OFFSET);
@@ -225,11 +155,11 @@ static int eswin_pcie_host_init(struct dw_pcie_rp *pp)
 	if (!ret) {
 		dev_info(pcie->pci.dev, "No clock exist.\n");
 		eswin_pcie_power_off(pcie);
-		eswin_pcie_clk_disable(pcie);
+		clk_bulk_disable_unprepare(pcie->num_clks, pcie->clks);
 		return -ENODEV;
 	}
 
-	/* config eswin vendor id and win2030 device id */
+	/* config eswin vendor id and eic7700 device id */
 	dw_pcie_writel_dbi(pci, PCIE_TYPE_DEV_VEND_ID, 0x20301fe1);
 
 	/* lane fix config, real driver NOT need, default x4 */
@@ -266,21 +196,6 @@ static const struct dw_pcie_ops dw_pcie_ops = {
 	.link_up = eswin_pcie_link_up,
 };
 
-static int __exit eswin_pcie_remove(struct platform_device *pdev)
-{
-	struct eswin_pcie *pcie = platform_get_drvdata(pdev);
-
-	dw_pcie_host_deinit(&pcie->pci.pp);
-
-	pm_runtime_put_sync(&pdev->dev);
-	pm_runtime_disable(&pdev->dev);
-
-	eswin_pcie_power_off(pcie);
-	eswin_pcie_clk_disable(pcie);
-
-	return 0;
-}
-
 static int eswin_pcie_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -302,51 +217,26 @@ static int eswin_pcie_probe(struct platform_device *pdev)
 		return PTR_ERR(pcie->mgmt_base);
 
 	/* Fetch clocks */
-	pcie->pcie_aux = devm_clk_get(dev, "pcie_aux_clk");
-	if (IS_ERR(pcie->pcie_aux)) {
-		return dev_err_probe(
-			dev, PTR_ERR(pcie->pcie_aux),
-			"pcie_aux clock source missing or invalid\n");
-	}
-
-	pcie->pcie_cfg = devm_clk_get(dev, "pcie_cfg_clk");
-	if (IS_ERR(pcie->pcie_cfg)) {
-		return dev_err_probe(
-			dev, PTR_ERR(pcie->pcie_cfg),
-			"pcie_cfg_clk clock source missing or invalid\n");
-	}
-
-	pcie->pcie_cr = devm_clk_get(dev, "pcie_cr_clk");
-	if (IS_ERR(pcie->pcie_cr)) {
-		return dev_err_probe(
-			dev, PTR_ERR(pcie->pcie_cr),
-			"pcie_cr_clk clock source missing or invalid\n");
-	}
-
-	pcie->pcie_aclk = devm_clk_get(dev, "pcie_aclk");
-
-	if (IS_ERR(pcie->pcie_aclk)) {
-		return dev_err_probe(
-			dev, PTR_ERR(pcie->pcie_aclk),
-			"pcie_aclk clock source missing or invalid\n");
-	}
+	pcie->num_clks = devm_clk_bulk_get_all(dev, &pcie->clks);
+	if (pcie->num_clks < 0)
+		return dev_err_probe(dev, pcie->num_clks,
+				     "failed to get pcie clocks\n");
 
 	/* Fetch reset */
-	pcie->powerup_rst =
-		devm_reset_control_get_optional(&pdev->dev, "pcie_powerup");
+	pcie->powerup_rst = devm_reset_control_get_optional(&pdev->dev, "powerup");
 	if (IS_ERR_OR_NULL(pcie->powerup_rst))
 		dev_err_probe(dev, PTR_ERR(pcie->powerup_rst),
-			      "unable to get powerup reset\n");
+			     "unable to get powerup reset\n");
 
-	pcie->cfg_rst = devm_reset_control_get_optional(&pdev->dev, "pcie_cfg");
+	pcie->cfg_rst = devm_reset_control_get_optional(&pdev->dev, "cfg");
 	if (IS_ERR_OR_NULL(pcie->cfg_rst))
 		dev_err_probe(dev, PTR_ERR(pcie->cfg_rst),
-			      "unable to get cfg reset\n");
+			     "unable to get cfg reset\n");
 
-	pcie->perst = devm_reset_control_get_optional(&pdev->dev, "pcie_pwren");
+	pcie->perst = devm_reset_control_get_optional(&pdev->dev, "pwren");
 	if (IS_ERR_OR_NULL(pcie->perst))
 		dev_err_probe(dev, PTR_ERR(pcie->perst),
-			      "unable to get perst\n");
+			     "unable to get perst\n");
 
 	platform_set_drvdata(pdev, pcie);
 
@@ -363,35 +253,51 @@ static int eswin_pcie_probe(struct platform_device *pdev)
 pm_runtime_put:
 	pm_runtime_put_sync(dev);
 	pm_runtime_disable(dev);
+
 	return err;
 }
 
-static const struct of_device_id eswin_pcie_of_match[] = {
-	{
-		.compatible = "eswin,eic7700-pcie",
-	},
-	{},
-};
+static void eswin_pcie_remove(struct platform_device *pdev)
+{
+	struct eswin_pcie *pcie = platform_get_drvdata(pdev);
+
+	dw_pcie_host_deinit(&pcie->pci.pp);
+	pm_runtime_put_sync(&pdev->dev);
+	pm_runtime_disable(&pdev->dev);
+
+	eswin_pcie_power_off(pcie);
+	clk_bulk_disable_unprepare(pcie->num_clks, pcie->clks);
+
+}
+
+static void eswin_pcie_shutdown(struct platform_device *pdev)
+{
+	struct eswin_pcie *pcie = platform_get_drvdata(pdev);
+
+	/* Bring down link, so bootloader gets clean state in case of reboot */
+	reset_control_assert(pcie->perst);
+}
 
 static int eswin_pcie_suspend(struct device *dev)
 {
 	struct eswin_pcie *pcie = dev_get_drvdata(dev);
 
-	dev_dbg(dev, "suspend %s\n", __func__);
 	if (!pm_runtime_status_suspended(dev))
-		eswin_pcie_clk_disable(pcie);
+		clk_bulk_disable_unprepare(pcie->num_clks, pcie->clks);
 
 	return 0;
 }
 
 static int eswin_pcie_resume(struct device *dev)
 {
+	int ret;
+
 	struct eswin_pcie *pcie = dev_get_drvdata(dev);
-
-	dev_dbg(dev, "resume %s\n", __func__);
-	if (!pm_runtime_status_suspended(dev))
-		eswin_pcie_clk_enable(pcie);
-
+	if (!pm_runtime_status_suspended(dev)){
+		ret = clk_bulk_prepare_enable(pcie->num_clks, pcie->clks);
+		if (ret)
+			return dev_err_probe(dev, ret, "failed to enable clocks\n");
+	}
 	return 0;
 }
 
@@ -399,22 +305,29 @@ static int eswin_pcie_runtime_suspend(struct device *dev)
 {
 	struct eswin_pcie *pcie = dev_get_drvdata(dev);
 
-	dev_dbg(dev, "runtime suspend %s\n", __func__);
-	return eswin_pcie_clk_disable(pcie);
+	clk_bulk_disable_unprepare(pcie->num_clks, pcie->clks);
+
+	return 0;
 }
 
 static int eswin_pcie_runtime_resume(struct device *dev)
 {
 	struct eswin_pcie *pcie = dev_get_drvdata(dev);
 
-	dev_dbg(dev, "runtime resume %s\n", __func__);
-	return eswin_pcie_clk_enable(pcie);
+	return clk_bulk_prepare_enable(pcie->num_clks, pcie->clks);
 }
 
 static const struct dev_pm_ops eswin_pcie_pm_ops = {
 	RUNTIME_PM_OPS(eswin_pcie_runtime_suspend, eswin_pcie_runtime_resume,
-		       NULL)
-		NOIRQ_SYSTEM_SLEEP_PM_OPS(eswin_pcie_suspend, eswin_pcie_resume)
+		     NULL)
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(eswin_pcie_suspend, eswin_pcie_resume)
+};
+
+static const struct of_device_id eswin_pcie_of_match[] = {
+	{
+		.compatible = "eswin,eic7700-pcie",
+	},
+	{},
 };
 
 static struct platform_driver eswin_pcie_driver = {
@@ -425,7 +338,7 @@ static struct platform_driver eswin_pcie_driver = {
 			.pm = &eswin_pcie_pm_ops,
 	},
 	.probe = eswin_pcie_probe,
-	.remove = __exit_p(eswin_pcie_remove),
+	.remove = eswin_pcie_remove,
 	.shutdown = eswin_pcie_shutdown,
 };
 
@@ -434,5 +347,5 @@ module_platform_driver(eswin_pcie_driver);
 MODULE_DEVICE_TABLE(of, eswin_pcie_of_match);
 MODULE_DESCRIPTION("PCIe host controller driver for eic7700 SoCs");
 MODULE_AUTHOR("Yu Ning <ningyu@eswincomputing.com>");
-MODULE_AUTHOR("SenChuan Zhang <zhangsenchuan@eswincomputing.com>");
-MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Senchuan Zhang <zhangsenchuan@eswincomputing.com>");
+MODULE_LICENSE("GPL v2");
