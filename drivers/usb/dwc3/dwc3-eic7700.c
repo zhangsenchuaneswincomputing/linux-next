@@ -5,7 +5,7 @@
  * Copyright 2024, Beijing ESWIN Computing Technology Co., Ltd.. All rights reserved.
  *
  * Authors: Wei Yang <yangwei1@eswincomputing.com>
- *          SenChuan Zhang <zhangsenchuan@eswincomputing.com>
+ *          Senchuan Zhang <zhangsenchuan@eswincomputing.com>
  */
 
 #include <linux/async.h>
@@ -49,13 +49,13 @@
 #define HSP_USB_AXI_LP_XS_CSYSREQ (0x1 << 16)
 
 struct dwc3_eswin {
-	int num_clocks;
+	int num_clks;
 	bool connected;
 	bool suspended;
 	bool force_mode;
 	bool is_phy_on;
 	struct device *dev;
-	struct clk **clks;
+    struct clk_bulk_data *clks;
 	struct dwc3 *dwc;
 	struct extcon_dev *edev;
 	struct usb_hcd *hcd;
@@ -70,7 +70,7 @@ struct dwc3_eswin {
 };
 
 static ssize_t dwc3_mode_show(struct device *device,
-			      struct device_attribute *attr, char *buf)
+			     struct device_attribute *attr, char *buf)
 {
 	struct dwc3_eswin *eswin = dev_get_drvdata(device);
 	struct dwc3 *dwc = eswin->dwc;
@@ -78,24 +78,24 @@ static ssize_t dwc3_mode_show(struct device *device,
 
 	switch (dwc->current_dr_role) {
 	case USB_DR_MODE_HOST:
-		ret = sprintf(buf, "host\n");
+		ret = sysfs_emit(buf, "host\n");
 		break;
 	case USB_DR_MODE_PERIPHERAL:
-		ret = sprintf(buf, "peripheral\n");
+		ret = sysfs_emit(buf, "peripheral\n");
 		break;
 	case USB_DR_MODE_OTG:
-		ret = sprintf(buf, "otg\n");
+		ret = sysfs_emit(buf, "otg\n");
 		break;
 	default:
-		ret = sprintf(buf, "UNKNOWN\n");
+		ret = sysfs_emit(buf, "UNKNOWN\n");
 	}
 
 	return ret;
 }
 
 static ssize_t dwc3_mode_store(struct device *device,
-			       struct device_attribute *attr, const char *buf,
-			       size_t count)
+			     struct device_attribute *attr, const char *buf,
+			     size_t count)
 {
 	struct dwc3_eswin *eswin = dev_get_drvdata(device);
 	struct dwc3 *dwc = eswin->dwc;
@@ -129,7 +129,7 @@ static ssize_t dwc3_hub_rst_show(struct device *device,
 	if (!IS_ERR(eswin->hub_gpio))
 		return sprintf(buf, "%d", gpiod_get_raw_value(eswin->hub_gpio));
 
-	return sprintf(buf, "UNKONWN");
+	return sysfs_emit(buf, "UNKONWN");
 }
 
 static ssize_t dwc3_hub_rst_store(struct device *device,
@@ -209,38 +209,38 @@ static int dwc3_eswin_get_extcon_dev(struct dwc3_eswin *eswin)
 	struct extcon_dev *edev;
 	s32 ret = 0;
 
-	if (device_property_read_bool(dev, "extcon")) {
+	if (device_property_present(dev, "extcon")) {
 		edev = extcon_get_edev_by_phandle(dev, 0);
-		if (IS_ERR(edev)) {
-			if (PTR_ERR(edev) != -EPROBE_DEFER)
-				dev_err(dev, "couldn't get extcon device\n");
-			return PTR_ERR(edev);
-		}
+		if (IS_ERR(edev))
+			return dev_err_probe(dev, PTR_ERR(edev),
+					     "couldn't get extcon device\n");
 		eswin->edev = edev;
 		eswin->device_nb.notifier_call = dwc3_eswin_device_notifier;
 		ret = devm_extcon_register_notifier(dev, edev, EXTCON_USB,
-						    &eswin->device_nb);
+					     &eswin->device_nb);
 		if (ret < 0)
 			dev_err(dev, "failed to register notifier for USB\n");
 
 		eswin->host_nb.notifier_call = dwc3_eswin_host_notifier;
 		ret = devm_extcon_register_notifier(dev, edev, EXTCON_USB_HOST,
-						    &eswin->host_nb);
+					     &eswin->host_nb);
 		if (ret < 0)
-			dev_err(dev,
-				"failed to register notifier for USB-HOST\n");
+			dev_err(dev, "failed to register notifier for USB-HOST\n");
 	}
 
 	return 0;
 }
 
-static int __init dwc3_eswin_deassert(struct dwc3_eswin *eswin)
+static int dwc3_eswin_deassert(struct dwc3_eswin *eswin)
 {
 	int rc;
 
 	if (eswin->vaux_rst) {
 		rc = reset_control_deassert(eswin->vaux_rst);
-		WARN_ON(rc != 0);
+		if (rc) {
+			dev_err(eswin->dev, "Failed to deassert reset: %d\n", rc);
+			return rc;
+		}
 	}
 
 	return 0;
@@ -248,11 +248,14 @@ static int __init dwc3_eswin_deassert(struct dwc3_eswin *eswin)
 
 static int dwc3_eswin_assert(struct dwc3_eswin *eswin)
 {
-	int rc = 0;
+	int rc;
 
 	if (eswin->vaux_rst) {
 		rc = reset_control_assert(eswin->vaux_rst);
-		WARN_ON(rc != 0);
+		if (rc) {
+			dev_err(eswin->dev, "Failed to assert reset: %d\n", rc);
+			return rc;
+		}
 	}
 
 	return 0;
@@ -265,38 +268,19 @@ static int dwc_usb_clk_init(struct device *dev)
 	u32 hsp_usb_axi_lp;
 	u32 hsp_usb_vbus_freq;
 	u32 hsp_usb_mpll;
-	int ret;
+	u32 args[4];
 
-	regmap = syscon_regmap_lookup_by_phandle(dev->of_node,
-						 "eswin,hsp_sp_csr");
-	if (IS_ERR(regmap)) {
-		dev_dbg(dev, "No hsp_sp_csr phandle specified\n");
-		return -1;
-	}
-	ret = of_property_read_u32_index(dev->of_node, "eswin,hsp_sp_csr", 1,
-					 &hsp_usb_bus);
-	if (ret) {
-		dev_err(dev, "can't get usb sid cfg reg offset (%d)\n", ret);
-		return ret;
-	}
-	ret = of_property_read_u32_index(dev->of_node, "eswin,hsp_sp_csr", 2,
-					 &hsp_usb_axi_lp);
-	if (ret) {
-		dev_err(dev, "can't get usb sid cfg reg offset (%d)\n", ret);
-		return ret;
-	}
-	ret = of_property_read_u32_index(dev->of_node, "eswin,hsp_sp_csr", 3,
-					 &hsp_usb_vbus_freq);
-	if (ret) {
-		dev_err(dev, "can't get usb sid cfg reg offset (%d)\n", ret);
-		return ret;
-	}
-	ret = of_property_read_u32_index(dev->of_node, "eswin,hsp_sp_csr", 4,
-					 &hsp_usb_mpll);
-	if (ret) {
-		dev_err(dev, "can't get usb sid cfg reg offset (%d)\n", ret);
-		return ret;
-	}
+	regmap = syscon_regmap_lookup_by_phandle_args(dev->of_node,
+						"eswin,hsp_sp_csr",
+						4, args);
+	if (IS_ERR(regmap))
+		return dev_err_probe(dev, PTR_ERR(regmap),
+				     "No hsp_sp_csr phandle specified\n");
+
+	hsp_usb_bus       = args[0];
+	hsp_usb_axi_lp    = args[1];
+	hsp_usb_vbus_freq = args[2];
+	hsp_usb_mpll      = args[3];
 
 	/*
 	 * usb1 clock init
@@ -308,7 +292,7 @@ static int dwc_usb_clk_init(struct device *dev)
 	 * reset usb core and usb phy
 	 */
 	regmap_write(regmap, hsp_usb_bus,
-		     HSP_USB_BUS_FILTER_EN | HSP_USB_BUS_CLKEN_GM |
+			     HSP_USB_BUS_FILTER_EN | HSP_USB_BUS_CLKEN_GM |
 			     HSP_USB_BUS_CLKEN_GS | HSP_USB_BUS_SW_RST |
 			     HSP_USB_BUS_CLK_EN);
 	regmap_write(regmap, hsp_usb_axi_lp,
@@ -323,61 +307,35 @@ static int dwc3_eswin_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node, *child;
 	struct platform_device *child_pdev;
-	unsigned int count;
+	const struct dwc3_eswin_driverdata *driver_data;
 	int ret;
-	int i;
 	int err_desc = 0;
 
 	eswin = devm_kzalloc(dev, sizeof(*eswin), GFP_KERNEL);
 	if (!eswin)
 		return -ENOMEM;
+
 	eswin->hub_gpio = devm_gpiod_get(dev, "hub-rst", GPIOD_OUT_HIGH);
 	err_desc = IS_ERR(eswin->hub_gpio);
-
 	if (!err_desc)
 		gpiod_set_raw_value(eswin->hub_gpio, 1);
 
-	count = of_clk_get_parent_count(np);
-	if (!count)
-		return -ENOENT;
-
-	eswin->num_clocks = count;
+	driver_data = of_device_get_match_data(dev);
+	eswin->dev = dev;
 	eswin->force_mode = false;
-	eswin->clks = devm_kcalloc(dev, eswin->num_clocks, sizeof(struct clk *),
-				   GFP_KERNEL);
-	if (!eswin->clks)
-		return -ENOMEM;
 
 	platform_set_drvdata(pdev, eswin);
-
 	mutex_init(&eswin->lock);
 
-	eswin->dev = dev;
-
-	mutex_lock(&eswin->lock);
-
-	for (i = 0; i < eswin->num_clocks; i++) {
-		struct clk *clk;
-
-		clk = of_clk_get(np, i);
-		if (IS_ERR(clk)) {
-			ret = PTR_ERR(clk);
-			goto err0;
-		}
-		ret = clk_prepare_enable(clk);
-		if (ret < 0) {
-			clk_put(clk);
-			goto err0;
-		}
-
-		eswin->clks[i] = clk;
-	}
+	eswin->num_clks = devm_clk_bulk_get_all_enabled(dev, &eswin->clks);
+	if (eswin->num_clks < 0)
+		return dev_err_probe(dev, eswin->num_clks,
+				     "failed to get usb clocks\n");
 
 	eswin->vaux_rst = devm_reset_control_get(dev, "vaux");
-	if (IS_ERR_OR_NULL(eswin->vaux_rst)) {
-		dev_err(dev, "Failed to asic0_rst handle\n");
-		return -EFAULT;
-	}
+	if (IS_ERR(eswin->vaux_rst))
+		return dev_err_probe(dev, PTR_ERR(eswin->vaux_rst),
+					 "Failed to asic0_rst handle\n");
 
 	dwc3_eswin_deassert(eswin);
 	dwc_usb_clk_init(dev);
@@ -421,7 +379,6 @@ static int dwc3_eswin_probe(struct platform_device *pdev)
 	if (ret < 0)
 		dev_err(dev, "couldn't get extcon device: %d\n", ret);
 
-	mutex_unlock(&eswin->lock);
 	ret = sysfs_create_group(&dev->kobj, &dwc3_eswin_attr_group);
 	if (ret)
 		dev_err(dev, "failed to create sysfs group: %d\n", ret);
@@ -435,15 +392,6 @@ err1:
 	pm_runtime_put_sync(dev);
 	pm_runtime_disable(dev);
 	dwc3_eswin_assert(eswin);
-err0:
-	for (i = 0; i < eswin->num_clocks && eswin->clks[i]; i++) {
-		if (!pm_runtime_status_suspended(dev))
-			clk_disable(eswin->clks[i]);
-		clk_unprepare(eswin->clks[i]);
-		clk_put(eswin->clks[i]);
-	}
-
-	mutex_unlock(&eswin->lock);
 
 	return ret;
 }
@@ -452,7 +400,6 @@ static void dwc3_eswin_remove(struct platform_device *pdev)
 {
 	struct dwc3_eswin *eswin = platform_get_drvdata(pdev);
 	struct device *dev = &pdev->dev;
-	int i = 0;
 
 	cancel_work_sync(&eswin->otg_work);
 
@@ -485,22 +432,13 @@ static void dwc3_eswin_remove(struct platform_device *pdev)
 	pm_runtime_disable(dev);
 
 	dwc3_eswin_assert(eswin);
-	for (i = 0; i < eswin->num_clocks; i++) {
-		if (!pm_runtime_status_suspended(dev))
-			clk_disable(eswin->clks[i]);
-		clk_unprepare(eswin->clks[i]);
-		clk_put(eswin->clks[i]);
-	}
 }
 
 #ifdef CONFIG_PM
 static int dwc3_eswin_runtime_suspend(struct device *dev)
 {
 	struct dwc3_eswin *eswin = dev_get_drvdata(dev);
-	int i;
-
-	for (i = 0; i < eswin->num_clocks; i++)
-		clk_disable(eswin->clks[i]);
+	clk_bulk_disable_unprepare(eswin->num_clks, eswin->clks);
 
 	device_init_wakeup(dev, false);
 
@@ -510,10 +448,13 @@ static int dwc3_eswin_runtime_suspend(struct device *dev)
 static int dwc3_eswin_runtime_resume(struct device *dev)
 {
 	struct dwc3_eswin *eswin = dev_get_drvdata(dev);
-	int i;
+	int ret;
 
-	for (i = 0; i < eswin->num_clocks; i++)
-		clk_enable(eswin->clks[i]);
+	ret = clk_bulk_prepare_enable(eswin->num_clks, eswin->clks);
+		if (ret) {
+			dev_err(dev, "failed to enable clocks: %d\n", ret);
+			return ret;
+	}
 
 	device_init_wakeup(dev, true);
 
@@ -580,8 +521,11 @@ static const struct dev_pm_ops dwc3_eswin_dev_pm_ops = {
 #endif /* CONFIG_PM */
 
 static const struct of_device_id eswin_dwc3_match[] = {
-	{ .compatible = "eswin,eic7700-dwc3" },
-	{ /* Sentinel */ }
+	{
+		.compatible = "eswin,eic7700-dwc3",
+	}, {
+
+	}
 };
 
 MODULE_DEVICE_TABLE(of, eswin_dwc3_match);
@@ -598,8 +542,7 @@ static struct platform_driver dwc3_eswin_driver = {
 
 module_platform_driver(dwc3_eswin_driver);
 
-MODULE_ALIAS("platform:eic7700-dwc3");
 MODULE_AUTHOR("Wei Yang <yangwei1@eswincomputing.com");
-MODULE_AUTHOR("SenChuan Zhang <zhangsenchuan@eswincomputing.com");
-MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Senchuan Zhang <zhangsenchuan@eswincomputing.com");
+MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("DesignWare USB3 ESWIN Glue Layer");
