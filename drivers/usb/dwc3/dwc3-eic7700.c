@@ -307,7 +307,6 @@ static int dwc3_eswin_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node, *child;
 	struct platform_device *child_pdev;
-	const struct dwc3_eswin_driverdata *driver_data;
 	int ret;
 	int err_desc = 0;
 
@@ -320,7 +319,6 @@ static int dwc3_eswin_probe(struct platform_device *pdev)
 	if (!err_desc)
 		gpiod_set_raw_value(eswin->hub_gpio, 1);
 
-	driver_data = of_device_get_match_data(dev);
 	eswin->dev = dev;
 	eswin->force_mode = false;
 
