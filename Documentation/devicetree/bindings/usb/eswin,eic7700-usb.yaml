@@ -76,7 +76,7 @@ examples:
                     <&clock 545>,
                     <&clock 546>;
             clock-names = "suspend","aclk", "cfg_clk";
-            eswin,hsp-sp-csr = <&hsp-sp-csr 0x800 0x808 0x83c 0x840>;
+            eswin,hsp-sp-csr = <&hsp_sp_csr 0x800 0x808 0x83c 0x840>;
             resets = <&reset 0x07 (1 << 15)>;
             reset-names = "vaux";
             ranges;
