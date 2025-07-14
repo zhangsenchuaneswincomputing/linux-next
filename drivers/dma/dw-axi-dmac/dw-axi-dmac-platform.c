@@ -32,6 +32,8 @@
 #include "dw-axi-dmac.h"
 #include "../dmaengine.h"
 #include "../virt-dma.h"
+#include <linux/mfd/syscon.h>
+#include <linux/regmap.h>
 
 /*
  * The set of bus widths supported by the DMA controller. DW AXI DMAC supports
@@ -50,6 +52,8 @@
 #define AXI_DMA_FLAG_HAS_APB_REGS	BIT(0)
 #define AXI_DMA_FLAG_HAS_RESETS		BIT(1)
 #define AXI_DMA_FLAG_USE_CFG2		BIT(2)
+#define AXI_DMA_FLAG_HAS_EIC7700_AON	BIT(3)
+#define AXI_DMA_FLAG_HAS_EIC7700_HSP	BIT(4)
 
 static inline void
 axi_dma_iowrite32(struct axi_dma_chip *chip, u32 reg, u32 val)
@@ -621,13 +625,22 @@ static void write_desc_dar(struct axi_dma_hw_desc *desc, dma_addr_t adr)
 	desc->lli->dar = cpu_to_le64(adr);
 }
 
-static void set_desc_src_master(struct axi_dma_hw_desc *desc)
+static void set_desc_src_master(struct axi_dma_hw_desc *desc,
+				 struct axi_dma_desc *dma_desc)
 {
 	u32 val;
+	unsigned int flags;
 
+	flags = (uintptr_t)of_device_get_match_data(dma_desc->chan->chip->dev);
 	/* Select AXI0 for source master */
 	val = le32_to_cpu(desc->lli->ctl_lo);
-	val &= ~CH_CTL_L_SRC_MAST;
+	if (flags & AXI_DMA_FLAG_HAS_EIC7700_AON) {
+		if (dma_desc->chan->direction != DMA_MEM_TO_MEM)
+			val |= CH_CTL_L_SRC_MAST;
+		else
+			val &= ~CH_CTL_L_SRC_MAST;
+	} else
+		val &= ~CH_CTL_L_SRC_MAST;
 	desc->lli->ctl_lo = cpu_to_le32(val);
 }
 
@@ -658,6 +671,7 @@ static int dw_axi_dma_set_hw_desc(struct axi_dma_chan *chan,
 	size_t block_ts;
 	u32 ctllo, ctlhi;
 	u32 burst_len;
+	unsigned int flags;
 
 	axi_block_ts = chan->chip->dw->hdata->block_size[chan->id];
 
@@ -670,6 +684,7 @@ static int dw_axi_dma_set_hw_desc(struct axi_dma_chan *chan,
 		return -EINVAL;
 	}
 
+	flags = (uintptr_t)of_device_get_match_data(chan->chip->dev);
 	switch (chan->direction) {
 	case DMA_MEM_TO_DEV:
 		reg_width = __ffs(chan->config.dst_addr_width);
@@ -725,7 +740,9 @@ static int dw_axi_dma_set_hw_desc(struct axi_dma_chan *chan,
 		 DWAXIDMAC_BURST_TRANS_LEN_4 << CH_CTL_L_SRC_MSIZE_POS;
 	hw_desc->lli->ctl_lo = cpu_to_le32(ctllo);
 
-	set_desc_src_master(hw_desc);
+	set_desc_src_master(hw_desc, chan->desc);
+	if (flags & AXI_DMA_FLAG_HAS_EIC7700_AON)
+		set_desc_dest_master(hw_desc, chan->desc);
 
 	hw_desc->len = len;
 	return 0;
@@ -991,7 +1008,7 @@ dma_chan_prep_dma_memcpy(struct dma_chan *dchan, dma_addr_t dst_adr,
 		       DWAXIDMAC_CH_CTL_L_INC << CH_CTL_L_SRC_INC_POS);
 		hw_desc->lli->ctl_lo = cpu_to_le32(reg);
 
-		set_desc_src_master(hw_desc);
+		set_desc_src_master(hw_desc, desc);
 		set_desc_dest_master(hw_desc, desc);
 
 		hw_desc->len = xfer_len;
@@ -1316,11 +1333,18 @@ static int dma_chan_resume(struct dma_chan *dchan)
 
 static int axi_dma_suspend(struct axi_dma_chip *chip)
 {
+	unsigned int flags;
+
+	flags = (uintptr_t)of_device_get_match_data(chip->dev);
+
 	axi_dma_irq_disable(chip);
 	axi_dma_disable(chip);
 
 	clk_disable_unprepare(chip->core_clk);
 	clk_disable_unprepare(chip->cfgr_clk);
+
+	if (flags & AXI_DMA_FLAG_HAS_EIC7700_HSP)
+		clk_disable_unprepare(chip->axi_clk);
 
 	return 0;
 }
@@ -1328,6 +1352,9 @@ static int axi_dma_suspend(struct axi_dma_chip *chip)
 static int axi_dma_resume(struct axi_dma_chip *chip)
 {
 	int ret;
+	unsigned int flags;
+
+	flags = (uintptr_t)of_device_get_match_data(chip->dev);
 
 	ret = clk_prepare_enable(chip->cfgr_clk);
 	if (ret < 0)
@@ -1336,6 +1363,12 @@ static int axi_dma_resume(struct axi_dma_chip *chip)
 	ret = clk_prepare_enable(chip->core_clk);
 	if (ret < 0)
 		return ret;
+
+	if (flags & AXI_DMA_FLAG_HAS_EIC7700_HSP) {
+		ret = clk_prepare_enable(chip->axi_clk);
+		if (ret < 0)
+			return ret;
+	}
 
 	axi_dma_enable(chip);
 	axi_dma_irq_enable(chip);
@@ -1357,19 +1390,55 @@ static int __maybe_unused axi_dma_runtime_resume(struct device *dev)
 	return axi_dma_resume(chip);
 }
 
+static int __maybe_unused dma_sel_cfg(struct axi_dma_chan *chan, u32 val)
+{
+	struct device *dev = chan->chip->dev;
+	struct regmap *regmap;
+	u32 dma_sel = 0;
+	unsigned int flags;
+	u32 syscon_args;
+
+	regmap = syscon_regmap_lookup_by_phandle_args(dev->of_node,
+							 "eswin,syscfg", 1, &syscon_args);
+	if (IS_ERR(regmap)) {
+		dev_err(dev, "No syscfg phandle specified\n");
+		return PTR_ERR(regmap);
+	}
+
+	regmap_read(regmap, syscon_args, &dma_sel);
+
+	flags = (uintptr_t)of_device_get_match_data(chan->chip->dev);
+	if (flags & AXI_DMA_FLAG_HAS_EIC7700_HSP) {
+		if (val < 32)
+			dma_sel &= ~(1 << val);
+	} else {
+		if (val < 32)
+			dma_sel |= (1 << val);
+	}
+	regmap_write(regmap, syscon_args, dma_sel);
+	return 0;
+}
+
 static struct dma_chan *dw_axi_dma_of_xlate(struct of_phandle_args *dma_spec,
 					    struct of_dma *ofdma)
 {
 	struct dw_axi_dma *dw = ofdma->of_dma_data;
 	struct axi_dma_chan *chan;
 	struct dma_chan *dchan;
+	unsigned int flags;
 
 	dchan = dma_get_any_slave_channel(&dw->dma);
 	if (!dchan)
 		return NULL;
 
 	chan = dchan_to_axi_dma_chan(dchan);
-	chan->hw_handshake_num = dma_spec->args[0];
+	flags = (uintptr_t)of_device_get_match_data(chan->chip->dev);
+	if ((flags & AXI_DMA_FLAG_HAS_EIC7700_AON) || (flags & AXI_DMA_FLAG_HAS_EIC7700_HSP)) {
+		chan->hw_handshake_num = dma_spec->args[1];
+		if (dma_spec->args_count > 1)
+			dma_sel_cfg(chan, dma_spec->args[2]);
+	} else
+		chan->hw_handshake_num = dma_spec->args[0];
 	return dchan;
 }
 
@@ -1518,6 +1587,12 @@ static int dw_probe(struct platform_device *pdev)
 	if (IS_ERR(chip->cfgr_clk))
 		return PTR_ERR(chip->cfgr_clk);
 
+	if (flags & AXI_DMA_FLAG_HAS_EIC7700_HSP) {
+		chip->axi_clk = devm_clk_get(chip->dev, "axi-clk");
+		if (IS_ERR(chip->axi_clk))
+			return PTR_ERR(chip->axi_clk);
+	}
+
 	ret = parse_device_properties(chip);
 	if (ret)
 		return ret;
@@ -1626,10 +1701,17 @@ static void dw_remove(struct platform_device *pdev)
 	struct dw_axi_dma *dw = chip->dw;
 	struct axi_dma_chan *chan, *_chan;
 	u32 i;
+	unsigned int flags;
+
+	flags = (uintptr_t)of_device_get_match_data(chip->dev);
 
 	/* Enable clk before accessing to registers */
 	clk_prepare_enable(chip->cfgr_clk);
 	clk_prepare_enable(chip->core_clk);
+
+	if (flags & AXI_DMA_FLAG_HAS_EIC7700_HSP)
+		clk_prepare_enable(chip->axi_clk);
+
 	axi_dma_irq_disable(chip);
 	for (i = 0; i < dw->hdata->nr_channels; i++) {
 		axi_chan_disable(&chip->dw->chan[i]);
@@ -1669,6 +1751,14 @@ static const struct of_device_id dw_dma_of_id_table[] = {
 	}, {
 		.compatible = "starfive,jh8100-axi-dma",
 		.data = (void *)AXI_DMA_FLAG_HAS_RESETS,
+	}, {
+		.compatible = "eswin,eic7700-axi-dma-aon",
+		.data = (void *)(AXI_DMA_FLAG_HAS_RESETS | AXI_DMA_FLAG_USE_CFG2
+					 | AXI_DMA_FLAG_HAS_EIC7700_AON),
+	},{
+		.compatible = "eswin,eic7700-axi-dma-hsp",
+		.data = (void *)(AXI_DMA_FLAG_HAS_RESETS | AXI_DMA_FLAG_USE_CFG2
+					 | AXI_DMA_FLAG_HAS_EIC7700_HSP),
 	},
 	{}
 };
@@ -1688,3 +1778,5 @@ module_platform_driver(dw_driver);
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("Synopsys DesignWare AXI DMA Controller platform driver");
 MODULE_AUTHOR("Eugeniy Paltsev <Eugeniy.Paltsev@synopsys.com>");
+MODULE_AUTHOR("Xiang Xu <xuxiang@eswincomputing.com>");
+MODULE_AUTHOR("Senchuan Zhang <zhangsenchuan@eswincomputing.com>");
