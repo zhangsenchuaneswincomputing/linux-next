@@ -70,6 +70,7 @@ struct axi_dma_chip {
 	void __iomem		*apb_regs;
 	struct clk		*core_clk;
 	struct clk		*cfgr_clk;
+	struct clk		*axi_clk;
 	struct dw_axi_dma	*dw;
 };
 
