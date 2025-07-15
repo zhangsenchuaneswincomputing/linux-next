@@ -1333,17 +1333,13 @@ static int dma_chan_resume(struct dma_chan *dchan)
 
 static int axi_dma_suspend(struct axi_dma_chip *chip)
 {
-	unsigned int flags;
-
-	flags = (uintptr_t)of_device_get_match_data(chip->dev);
-
 	axi_dma_irq_disable(chip);
 	axi_dma_disable(chip);
 
 	clk_disable_unprepare(chip->core_clk);
 	clk_disable_unprepare(chip->cfgr_clk);
 
-	if (flags & AXI_DMA_FLAG_HAS_EIC7700_HSP)
+	if (chip->axi_clk)
 		clk_disable_unprepare(chip->axi_clk);
 
 	return 0;
@@ -1352,9 +1348,6 @@ static int axi_dma_suspend(struct axi_dma_chip *chip)
 static int axi_dma_resume(struct axi_dma_chip *chip)
 {
 	int ret;
-	unsigned int flags;
-
-	flags = (uintptr_t)of_device_get_match_data(chip->dev);
 
 	ret = clk_prepare_enable(chip->cfgr_clk);
 	if (ret < 0)
@@ -1364,7 +1357,7 @@ static int axi_dma_resume(struct axi_dma_chip *chip)
 	if (ret < 0)
 		return ret;
 
-	if (flags & AXI_DMA_FLAG_HAS_EIC7700_HSP) {
+	if (chip->axi_clk) {
 		ret = clk_prepare_enable(chip->axi_clk);
 		if (ret < 0)
 			return ret;
@@ -1701,15 +1694,12 @@ static void dw_remove(struct platform_device *pdev)
 	struct dw_axi_dma *dw = chip->dw;
 	struct axi_dma_chan *chan, *_chan;
 	u32 i;
-	unsigned int flags;
-
-	flags = (uintptr_t)of_device_get_match_data(chip->dev);
 
 	/* Enable clk before accessing to registers */
 	clk_prepare_enable(chip->cfgr_clk);
 	clk_prepare_enable(chip->core_clk);
 
-	if (flags & AXI_DMA_FLAG_HAS_EIC7700_HSP)
+	if (chip->axi_clk)
 		clk_prepare_enable(chip->axi_clk);
 
 	axi_dma_irq_disable(chip);
